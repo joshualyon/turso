@@ -319,10 +319,10 @@ impl BugBase {
 
 impl BugBase {
     pub(crate) fn get_current_commit_hash() -> anyhow::Result<String> {
-        let git_dir = find_git_dir(current_dir()?).with_context(|| "should be a git repo")?;
-        let hash =
-            resolve_head(&git_dir).with_context(|| "should be able to get the commit hash")?;
-        Ok(hash)
+        // let git_dir = find_git_dir(current_dir()?).with_context(|| "should be a git repo")?;
+        // let hash =
+        //     resolve_head(&git_dir).with_context(|| "should be able to get the commit hash")?;
+        Ok("patate".into())
     }
 
     pub(crate) fn get_limbo_project_dir() -> anyhow::Result<PathBuf> {
@@ -351,18 +351,6 @@ fn find_git_dir(start_path: impl AsRef<Path>) -> Option<PathBuf> {
         if !current.pop() {
             return None;
         }
-    }
-}
-
-fn resolve_head(git_dir: impl AsRef<Path>) -> anyhow::Result<String> {
-    // HACK ignores stuff like packed-refs
-    let head_path = git_dir.as_ref().join("HEAD");
-    let head_contents = read_to_string(&head_path)?;
-    if let Some(ref_path) = head_contents.strip_prefix("ref: ") {
-        let ref_file = git_dir.as_ref().join(ref_path);
-        read_to_string(&ref_file)
-    } else {
-        Ok(head_contents)
     }
 }
 
