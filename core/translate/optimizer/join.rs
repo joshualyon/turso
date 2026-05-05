@@ -1,6 +1,3 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
-
 use crate::{turso_assert_eq, turso_assert_greater_than};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -13,10 +10,10 @@ use super::{
     constraints::TableConstraints,
     cost_params::CostModelParams,
     order::OrderTarget,
-    IndexMethodCandidate,
+    AvailableIndexes, IndexMethodCandidate,
 };
 use crate::{
-    schema::{Index, Schema},
+    schema::Schema,
     stats::AnalyzeStats,
     translate::{
         expr::{walk_expr, WalkControl},
@@ -164,7 +161,7 @@ pub fn join_lhs_and_rhs<'a>(
     index_method_candidates: &[IndexMethodCandidate],
     params: &CostModelParams,
     analyze_stats: &AnalyzeStats,
-    available_indexes: &HashMap<String, VecDeque<Arc<Index>>>,
+    available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
     schema: &Schema,
 ) -> Result<Option<JoinN>> {
@@ -892,7 +889,7 @@ pub fn compute_best_join_order<'a>(
     index_method_candidates: &[IndexMethodCandidate],
     params: &CostModelParams,
     analyze_stats: &AnalyzeStats,
-    available_indexes: &HashMap<String, VecDeque<Arc<Index>>>,
+    available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
     schema: &Schema,
 ) -> Result<Option<BestJoinOrderResult>> {
@@ -930,7 +927,7 @@ pub(crate) fn compute_best_join_order_with_context<'a>(
     index_method_candidates: &[IndexMethodCandidate],
     params: &CostModelParams,
     analyze_stats: &AnalyzeStats,
-    available_indexes: &HashMap<String, VecDeque<Arc<Index>>>,
+    available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
     schema: &Schema,
 ) -> Result<Option<BestJoinOrderResult>> {
@@ -1364,7 +1361,7 @@ pub fn compute_greedy_join_order<'a>(
     index_method_candidates: &[IndexMethodCandidate],
     params: &CostModelParams,
     analyze_stats: &AnalyzeStats,
-    available_indexes: &HashMap<String, VecDeque<Arc<Index>>>,
+    available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
     schema: &Schema,
 ) -> Result<Option<BestJoinOrderResult>> {
@@ -1624,7 +1621,7 @@ pub fn compute_naive_left_deep_plan<'a>(
     index_method_candidates: &[IndexMethodCandidate],
     params: &CostModelParams,
     analyze_stats: &AnalyzeStats,
-    available_indexes: &HashMap<String, VecDeque<Arc<Index>>>,
+    available_indexes: &AvailableIndexes,
     table_references: &TableReferences,
     schema: &Schema,
 ) -> Result<Option<JoinN>> {
@@ -1814,6 +1811,35 @@ mod tests {
 
     fn empty_schema() -> Schema {
         Schema::default()
+    }
+
+    fn insert_indexes_for_table_name(
+        available_indexes: &mut AvailableIndexes,
+        joined_tables: &[JoinedTable],
+        table_name: &str,
+        indexes: VecDeque<Arc<Index>>,
+    ) {
+        let table_ref = joined_tables
+            .iter()
+            .find(|table_ref| table_ref.table.get_name() == table_name)
+            .expect("test table should exist");
+        available_indexes.insert(table_ref.internal_id, indexes);
+    }
+
+    fn push_index_for_table_name(
+        available_indexes: &mut AvailableIndexes,
+        joined_tables: &[JoinedTable],
+        table_name: &str,
+        index: Arc<Index>,
+    ) {
+        let table_ref = joined_tables
+            .iter()
+            .find(|table_ref| table_ref.table.get_name() == table_name)
+            .expect("test table should exist");
+        available_indexes
+            .entry(table_ref.internal_id)
+            .or_default()
+            .push_front(index);
     }
 
     #[test]
@@ -2018,7 +2044,12 @@ mod tests {
             index_method: None,
             on_conflict: None,
         });
-        available_indexes.insert("test_table".to_string(), VecDeque::from([index]));
+        insert_indexes_for_table_name(
+            &mut available_indexes,
+            table_references.joined_tables(),
+            "test_table",
+            VecDeque::from([index]),
+        );
 
         let table_constraints = constraints_from_where_clause(
             &where_clause,
@@ -2111,7 +2142,12 @@ mod tests {
             index_method: None,
             on_conflict: None,
         });
-        available_indexes.insert("table1".to_string(), VecDeque::from([index1]));
+        insert_indexes_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "table1",
+            VecDeque::from([index1]),
+        );
 
         // SELECT * FROM table1 JOIN table2 WHERE table1.id = table2.id
         // expecting table2 to be chosen first due to the index on table1.id
@@ -2253,7 +2289,12 @@ mod tests {
                     index_method: None,
                     on_conflict: None,
                 });
-                available_indexes.insert(table_name.to_string(), VecDeque::from([index]));
+                insert_indexes_for_table_name(
+                    &mut available_indexes,
+                    &joined_tables,
+                    table_name,
+                    VecDeque::from([index]),
+                );
             });
         let customer_id_idx = Arc::new(Index {
             name: "orders_customer_id_idx".to_string(),
@@ -2294,12 +2335,18 @@ mod tests {
             on_conflict: None,
         });
 
-        available_indexes
-            .entry("orders".to_string())
-            .and_modify(|v| v.push_front(customer_id_idx));
-        available_indexes
-            .entry("order_items".to_string())
-            .and_modify(|v| v.push_front(order_id_idx));
+        push_index_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "orders",
+            customer_id_idx,
+        );
+        push_index_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "order_items",
+            order_id_idx,
+        );
 
         // SELECT * FROM orders JOIN customers JOIN order_items
         // WHERE orders.customer_id = customers.id AND orders.id = order_items.order_id AND customers.id = 42
@@ -2799,7 +2846,6 @@ mod tests {
         });
 
         let mut available_indexes = HashMap::default();
-        available_indexes.insert("t1".to_string(), VecDeque::from([index]));
 
         let table = Table::BTree(table);
         joined_tables.push(JoinedTable {
@@ -2814,6 +2860,12 @@ mod tests {
             database_id: MAIN_DB_ID,
             indexed: None,
         });
+        insert_indexes_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "t1",
+            VecDeque::from([index]),
+        );
 
         // Create where clause that only references second column
         let mut where_clause = vec![WhereTerm {
@@ -2917,8 +2969,6 @@ mod tests {
             index_method: None,
             on_conflict: None,
         });
-        available_indexes.insert("t1".to_string(), VecDeque::from([index]));
-
         let table = Table::BTree(table);
         joined_tables.push(JoinedTable {
             op: Operation::default_scan_for(&table),
@@ -2932,6 +2982,12 @@ mod tests {
             database_id: MAIN_DB_ID,
             indexed: None,
         });
+        insert_indexes_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "t1",
+            VecDeque::from([index]),
+        );
 
         // Create where clause that references first and third columns
         let mut where_clause = vec![
@@ -3056,8 +3112,6 @@ mod tests {
             index_method: None,
             on_conflict: None,
         });
-        available_indexes.insert("t1".to_string(), VecDeque::from([index]));
-
         let table = Table::BTree(table);
         joined_tables.push(JoinedTable {
             op: Operation::default_scan_for(&table),
@@ -3071,6 +3125,12 @@ mod tests {
             database_id: MAIN_DB_ID,
             indexed: None,
         });
+        insert_indexes_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "t1",
+            VecDeque::from([index]),
+        );
 
         // Create where clause: c1 = 5 AND c2 > 10 AND c3 = 7
         let mut where_clause = vec![
@@ -3334,7 +3394,12 @@ mod tests {
             index_method: None,
             on_conflict: None,
         });
-        available_indexes.insert("t2".to_string(), VecDeque::from([index_t2_a]));
+        insert_indexes_for_table_name(
+            &mut available_indexes,
+            &joined_tables,
+            "t2",
+            VecDeque::from([index_t2_a]),
+        );
 
         // WHERE t1.a = t2.a
         let mut where_clause = vec![_create_binary_expr(
